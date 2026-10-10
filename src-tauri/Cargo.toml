@@ -1,6 +1,6 @@
 [package]
 name = "eden-mod-manager"
-version = "0.4.1"
+version = "0.4.2"
 description = "Instalador de mods e compressor NSZ para Eden, yuzu e Ryujinx"
 authors = ["pendiego"]
 license = "MIT"
