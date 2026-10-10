@@ -491,6 +491,7 @@ const ERR_EN: [string, string][] = [
   ["Pacote do Skyline/ARCropolis em formato inesperado", "Unexpected Skyline/ARCropolis package format"],
   ["Pasta de destino já existe:", "Destination folder already exists:"],
   ["GameBanana respondeu HTTP ", "GameBanana responded HTTP "],
+  ["GameBanana limitou os pedidos; tente de novo em ", "GameBanana is rate limiting requests; try again in "],
   ["Nenhum pacote compatível neste mod do GameBanana", "No compatible package in this GameBanana mod"],
   ["Nenhuma pasta romfs/exefs encontrada no arquivo", "No romfs/exefs folder found in the archive"],
   ["Arquivo inválido", "Invalid file"],

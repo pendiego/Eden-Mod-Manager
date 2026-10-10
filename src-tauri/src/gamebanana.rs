@@ -82,10 +82,82 @@ struct GameRec {
 }
 
 const MAX_RETRIES: u32 = 3;
+/// Maior espera que o app aceita fazer sozinho; acima disso, avisa o usuário em vez de ficar parado.
+const MAX_WAIT: Duration = Duration::from_secs(30);
+const RATE_LIMITED: &str = "GameBanana limitou os pedidos; tente de novo em ";
 
-/// Pausa antes da nova tentativa após um 429: `Retry-After` se o site informar, senão 2 s, 4 s, 8 s; no máximo 15 s.
-fn backoff(tries: u32, retry_after: Option<u64>) -> Duration {
-    Duration::from_secs(retry_after.unwrap_or(2u64 << tries).min(15))
+/// Resfriamento compartilhado do host: depois de um 429, NENHUM pedido sai antes do fim da pausa,
+/// inclusive os que já estavam na fila ou chegam durante ela.
+struct Throttle {
+    until: Mutex<Option<Instant>>,
+}
+
+impl Throttle {
+    const fn new() -> Self {
+        Self { until: Mutex::new(None) }
+    }
+
+    fn remaining(&self) -> Duration {
+        self.until.lock().map_or(Duration::ZERO, |t| t.saturating_duration_since(Instant::now()))
+    }
+
+    /// Estende a pausa até `now + wait`; nunca encurta uma pausa já maior.
+    fn extend(&self, wait: Duration) {
+        let end = Instant::now() + wait;
+        let mut u = self.until.lock();
+        if u.is_none_or(|t| t < end) {
+            *u = Some(end);
+        }
+    }
+}
+
+static THROTTLE: Throttle = Throttle::new();
+
+fn rate_limited(wait: Duration) -> String {
+    format!("{RATE_LIMITED}{} s", wait.as_secs_f64().ceil() as u64)
+}
+
+/// Envia o GET respeitando o limite de pedidos simultâneos e o resfriamento do host.
+/// 429: usa `Retry-After` por inteiro (sem encurtar) ou 2/4/8 s se não vier; se a espera passar de
+/// `MAX_WAIT` ou as tentativas acabarem, devolve erro com o tempo pedido pelo site.
+async fn send(url: &str, throttle: &Throttle, inflight: &tokio::sync::Semaphore) -> Result<reqwest::Response, String> {
+    let mut tries = 0u32;
+    loop {
+        // no máximo MAX_INFLIGHT pedidos simultâneos no total, qualquer que seja o número de varreduras
+        let _permit = inflight.acquire().await.map_err(|e| e.to_string())?;
+        // checa o resfriamento DEPOIS de obter a vaga: vale também para quem esperava na fila
+        loop {
+            let rem = throttle.remaining();
+            if rem.is_zero() {
+                break;
+            }
+            if rem > MAX_WAIT {
+                return Err(rate_limited(rem));
+            }
+            tokio::time::sleep(rem).await;
+        }
+        let resp = HTTP_JSON
+            .get(url)
+            .header("User-Agent", UA)
+            .timeout(Duration::from_secs(20))
+            .send()
+            .await
+            .map_err(|e| format!("Falha de rede: {e}"))?;
+        if resp.status().as_u16() != 429 {
+            return Ok(resp);
+        }
+        let wait = resp
+            .headers()
+            .get("retry-after")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .map_or(Duration::from_secs(2u64 << tries), Duration::from_secs);
+        throttle.extend(wait);
+        if tries >= MAX_RETRIES || wait > MAX_WAIT {
+            return Err(rate_limited(wait));
+        }
+        tries += 1;
+    }
 }
 
 async fn get<T: serde::de::DeserializeOwned>(path: &str, query: &[(&str, String)]) -> Result<T, String> {
@@ -94,26 +166,7 @@ async fn get<T: serde::de::DeserializeOwned>(path: &str, query: &[(&str, String)
         .map(|(k, v)| format!("{}={}", crate::install::encode_segment(k), crate::install::encode_segment(v)))
         .collect();
     let url = format!("{API}/{path}?{}", qs.join("&"));
-    // no máximo MAX_INFLIGHT pedidos simultâneos no total, qualquer que seja o número de varreduras
-    let _permit = INFLIGHT.acquire().await.map_err(|e| e.to_string())?;
-    let mut tries = 0u32;
-    let resp = loop {
-        let resp = HTTP_JSON
-            .get(&url)
-            .header("User-Agent", UA)
-            .timeout(Duration::from_secs(20))
-            .send()
-            .await
-            .map_err(|e| format!("Falha de rede: {e}"))?;
-        // 429: até MAX_RETRIES novas tentativas com pausa crescente; o permit fica retido, então os demais pedidos também esperam
-        if resp.status().as_u16() == 429 && tries < MAX_RETRIES {
-            let after = resp.headers().get("retry-after").and_then(|v| v.to_str().ok()).and_then(|v| v.parse().ok());
-            tokio::time::sleep(backoff(tries, after)).await;
-            tries += 1;
-            continue;
-        }
-        break resp;
-    };
+    let resp = send(&url, &THROTTLE, &INFLIGHT).await?;
     if !resp.status().is_success() {
         return Err(format!("GameBanana respondeu HTTP {}", resp.status()));
     }
@@ -529,13 +582,108 @@ pub async fn download_url(mod_id: &str) -> Result<(String, String), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::future::Future;
+
+    /// Servidor HTTP local mínimo: `reply(n)` decide status/`Retry-After` do n-ésimo pedido (0-based);
+    /// `arrivals` guarda o instante em que cada pedido chegou.
+    struct Server {
+        url: String,
+        arrivals: std::sync::Arc<Mutex<Vec<Instant>>>,
+    }
+
+    fn serve(reply: impl Fn(usize) -> (u16, Option<u64>) + Send + Sync + 'static) -> Server {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/x", listener.local_addr().unwrap());
+        let arrivals = std::sync::Arc::new(Mutex::new(Vec::new()));
+        let (seen, reply) = (arrivals.clone(), std::sync::Arc::new(reply));
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let (seen, reply) = (seen.clone(), reply.clone());
+                std::thread::spawn(move || {
+                    let mut s = stream.unwrap();
+                    let mut buf = [0u8; 2048];
+                    let mut got = Vec::new();
+                    while !got.windows(4).any(|w| w == b"\r\n\r\n") {
+                        let n = s.read(&mut buf).unwrap_or(0);
+                        if n == 0 { return; }
+                        got.extend_from_slice(&buf[..n]);
+                    }
+                    let n = {
+                        let mut a = seen.lock();
+                        a.push(Instant::now());
+                        a.len() - 1
+                    };
+                    let (status, after) = reply(n);
+                    let retry = after.map_or(String::new(), |s| format!("Retry-After: {s}\r\n"));
+                    let body = if status == 200 { r#"{"ok":1}"# } else { "" };
+                    let _ = write!(s, "HTTP/1.1 {status} X\r\n{retry}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+                });
+            }
+        });
+        Server { url, arrivals }
+    }
+
+    fn run<T>(f: impl Future<Output = T>) -> T {
+        tauri::async_runtime::block_on(f)
+    }
 
     #[test]
-    fn backoff_grows_honors_retry_after_and_is_capped() {
-        let secs = |t, a| backoff(t, a).as_secs();
-        assert_eq!((secs(0, None), secs(1, None), secs(2, None)), (2, 4, 8));
-        assert_eq!(secs(0, Some(7)), 7);
-        assert_eq!(secs(0, Some(600)), 15);
+    fn send_waits_retry_after_in_full_then_succeeds() {
+        let srv = serve(|n| if n == 0 { (429, Some(2)) } else { (200, None) });
+        let (throttle, inflight) = (Throttle::new(), tokio::sync::Semaphore::new(6));
+        let t0 = Instant::now();
+        let resp = run(send(&srv.url, &throttle, &inflight)).unwrap();
+        assert_eq!(resp.status().as_u16(), 200);
+        let a = srv.arrivals.lock().clone();
+        assert_eq!(a.len(), 2);
+        // o segundo pedido só sai depois dos 2 s completos pedidos pelo servidor
+        assert!(a[1].duration_since(a[0]) >= Duration::from_millis(1990), "retry veio cedo: {:?}", a[1].duration_since(a[0]));
+        assert!(t0.elapsed() < Duration::from_secs(5));
+    }
+
+    #[test]
+    fn cooldown_holds_back_concurrent_requests_even_with_free_slots() {
+        // só o primeiro pedido recebe 429 (Retry-After 2); os outros 4 saem 300 ms depois, com 5 vagas livres
+        let srv = serve(|n| if n == 0 { (429, Some(2)) } else { (200, None) });
+        let (throttle, inflight) = (Throttle::new(), tokio::sync::Semaphore::new(6));
+        std::thread::scope(|s| {
+            let first = s.spawn(|| run(send(&srv.url, &throttle, &inflight)).map(|r| r.status().as_u16()));
+            std::thread::sleep(Duration::from_millis(300));
+            let others: Vec<_> = (0..4).map(|_| s.spawn(|| run(send(&srv.url, &throttle, &inflight)).map(|r| r.status().as_u16()))).collect();
+            assert_eq!(first.join().unwrap(), Ok(200));
+            for o in others {
+                assert_eq!(o.join().unwrap(), Ok(200));
+            }
+        });
+        let a = srv.arrivals.lock().clone();
+        assert_eq!(a.len(), 6, "1 com 429 + 1 retry + 4 concorrentes");
+        // nenhum pedido chega ao servidor durante a pausa de 2 s do primeiro 429
+        for t in &a[1..] {
+            assert!(t.duration_since(a[0]) >= Duration::from_millis(1990), "pedido saiu durante a pausa: {:?}", t.duration_since(a[0]));
+        }
+    }
+
+    #[test]
+    fn long_retry_after_is_reported_not_shortened_and_blocks_later_requests() {
+        let srv = serve(|_| (429, Some(120)));
+        let (throttle, inflight) = (Throttle::new(), tokio::sync::Semaphore::new(6));
+        let t0 = Instant::now();
+        let err = run(send(&srv.url, &throttle, &inflight)).unwrap_err();
+        assert!(err.starts_with(RATE_LIMITED) && err.contains("120"), "{err}");
+        assert!(t0.elapsed() < Duration::from_secs(2), "não deve dormir os 120 s");
+        // pedidos seguintes falham na hora, sem tocar o servidor
+        let err2 = run(send(&srv.url, &throttle, &inflight)).unwrap_err();
+        assert!(err2.starts_with(RATE_LIMITED), "{err2}");
+        assert_eq!(srv.arrivals.lock().len(), 1);
+    }
+
+    #[test]
+    fn throttle_never_shortens_a_longer_pause() {
+        let t = Throttle::new();
+        t.extend(Duration::from_secs(20));
+        t.extend(Duration::from_secs(1));
+        assert!(t.remaining() > Duration::from_secs(15));
     }
 
     /// Registro mínimo (campos opcionais ausentes) e extras desconhecidos não podem quebrar o parse.
