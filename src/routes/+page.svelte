@@ -54,6 +54,8 @@
   let gb = $state<{ tid: string; status: "loading" | "ok" | "notfound" | "error"; mods: GbMod[]; error: string } | null>(null);
   const gbPendingMore = new Map<number, GbMore>();
   let gbSort = $state<"likes" | "newest" | "views" | "downloads" | "name">("likes");
+  // o aviso "instalado" some de vez ao fechar; o de "faltando" é acionável e não pode ser fechado
+  let fwOkDismissed = $state(localStorage.getItem("fwOkDismissed") === "1");
   // posição de cada mod no ranking de downloads, por jogo (só os mais baixados; o resto fica depois, por curtidas)
   let gbDlRanks = $state<Record<string, Map<string, number>>>({});
   const gbDlPending = new Set<string>();
@@ -1063,12 +1065,13 @@
               </div>
             {/if}
           </div>
-          {#if smash || fw?.needed}
+          {#if (smash || fw?.needed) && !(fwOkDismissed && fw && !fwMissing)}
             <div class="warn dependency-notice" class:ok={fw && !fwMissing} role="note">
               {@render icon(fw && !fwMissing ? ICON.check : ICON.alert)}
               <p>{fw ? (fwMissing ? t(smash ? "dependenciesMissing" : "skylineMissing", { list: fwMissing }) : t(smash ? "dependenciesReady" : "skylineReady")) : t("dependenciesNotice")}</p>
               {#if smash}<button onclick={() => { void refreshFw(); openModal(dependencies); }}>{@render icon(ICON.help)}{t("dependencies")}</button>{/if}
               {#if fw && fwMissing}<button disabled={busy} onclick={installFrameworks}>{t(smash ? "dependenciesInstallNow" : "skylineInstallNow")}</button>{/if}
+              {#if fw && !fwMissing}<button class="icon-btn" aria-label={t("dismiss")} title={t("dismiss")} onclick={() => { fwOkDismissed = true; localStorage.setItem("fwOkDismissed", "1"); }}>{@render icon(ICON.x)}</button>{/if}
             </div>
           {/if}
         {/if}
