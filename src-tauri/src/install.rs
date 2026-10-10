@@ -243,11 +243,13 @@ fn stem(p: &str) -> String {
 
 fn copy_dir_all(src: &Path, dst: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(dst)?;
-    for entry in WalkDir::new(src).into_iter().filter_map(Result::ok) {
-        let rel = match entry.path().strip_prefix(src) {
-            Ok(r) => r,
-            Err(_) => continue,
-        };
+    for entry_res in WalkDir::new(src) {
+        let entry = entry_res.map_err(|e| {
+            let msg = e.to_string();
+            e.into_io_error().unwrap_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, msg))
+        })?;
+        let rel = entry.path().strip_prefix(src)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
         let target = dst.join(rel);
         if entry.file_type().is_dir() {
             std::fs::create_dir_all(&target)?;
@@ -840,6 +842,7 @@ fn commit(app: &AppHandle, p: PendingInstall, keys: &[String]) -> Result<Vec<Ins
     let mut done = Vec::new();
     let mut created = Vec::new();
     let mut backups = Vec::new();
+    let mut save_backups = Vec::new();
     let result = (|| {
         for (n, root) in selected.into_iter().enumerate() {
             if root.destination == Destination::Save {
@@ -847,26 +850,31 @@ fn commit(app: &AppHandle, p: PendingInstall, keys: &[String]) -> Result<Vec<Ins
                     return Err("Feche o emulador antes de instalar um save game.".into());
                 }
                 let game_dir = destination_dir(&emu, &p.tid, Destination::Save, false)?;
-                if game_dir.is_dir() {
-                    let has_files = WalkDir::new(&game_dir)
-                        .into_iter()
-                        .filter_map(Result::ok)
-                        .any(|e| e.file_type().is_file());
-                    if has_files {
-                        let backup_dir = game_dir
-                            .parent()
-                            .ok_or("Pasta pai de save inválida")?
-                            .join(format!("{}_backup_{}", p.tid.to_ascii_uppercase(), catalog::now_secs()));
-                        copy_dir_all(&game_dir, &backup_dir)
-                            .map_err(|e| format!("Falha ao criar backup do save: {e}"))?;
-                    }
-                }
-                std::fs::create_dir_all(&game_dir).map_err(|e| e.to_string())?;
+                let save_parent = game_dir.parent().ok_or("Pasta pai de save inválida")?;
+                let staging = checked_path(save_parent, &format!("{TMP_PREFIX}save-stage-{}-{n}", p.tmp.file_name().unwrap().to_string_lossy()))?;
+                std::fs::create_dir_all(&staging).map_err(|e| e.to_string())?;
+                created.push(staging.clone());
+
                 for (src, dest) in &root.files {
-                    let to = checked_path(&game_dir, dest)?;
+                    let to = checked_path(&staging, dest)?;
                     if let Some(d) = to.parent() { std::fs::create_dir_all(d).map_err(|e| e.to_string())?; }
                     std::fs::copy(src, &to).map_err(|e| format!("Falha ao copiar arquivo de save: {e}"))?;
                 }
+
+                let has_files = game_dir.is_dir()
+                    && WalkDir::new(&game_dir).into_iter().filter_map(Result::ok).any(|e| e.file_type().is_file());
+                if has_files {
+                    let base_name = format!("{}_backup_{}", p.tid.to_ascii_uppercase(), catalog::now_secs());
+                    let unique_name = unique_folder(save_parent, &base_name);
+                    let backup_dir = save_parent.join(&unique_name);
+                    copy_dir_all(&game_dir, &backup_dir)
+                        .map_err(|e| format!("Falha ao criar backup do save: {e}"))?;
+                    save_backups.push((game_dir.clone(), backup_dir));
+                }
+
+                std::fs::create_dir_all(&game_dir).map_err(|e| e.to_string())?;
+                copy_dir_all(&staging, &game_dir).map_err(|e| format!("Falha ao aplicar save: {e}"))?;
+
                 done.push(Installed {
                     emu: emu.kind, destination: root.destination, tid: p.tid.clone(),
                     folder: format!("save-{}", catalog::now_secs()),
@@ -928,6 +936,10 @@ fn commit(app: &AppHandle, p: PendingInstall, keys: &[String]) -> Result<Vec<Ins
     if let Err(e) = result {
         for target in created.iter().rev() { let _ = std::fs::remove_dir_all(target); }
         for (old, backup) in backups.iter().rev() { let _ = std::fs::rename(backup, old); }
+        for (live, backup) in save_backups.iter().rev() {
+            let _ = std::fs::remove_dir_all(live);
+            let _ = copy_dir_all(backup, live);
+        }
         return Err(e);
     }
     for (_, backup) in backups { let _ = std::fs::remove_dir_all(backup); }
@@ -1713,6 +1725,36 @@ mod tests {
         std::fs::create_dir_all(dir.join("config")).unwrap();
         let save_dir = emu.save_dir(SMASH_TID).unwrap();
         assert_eq!(save_dir, user_save.join(SMASH_TID));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn copy_dir_all_propagates_nonexistent_src_error() {
+        let nonexistent = Path::new("nonexistent_path_for_test");
+        let dst = test_dir("copy-err");
+        assert!(copy_dir_all(nonexistent, &dst).is_err());
+        let _ = std::fs::remove_dir_all(&dst);
+    }
+
+    #[test]
+    fn save_import_rollback_restores_original_save() {
+        let dir = test_dir("save-rollback");
+        let live_save = dir.join("live_save");
+        let backup_dir = dir.join("backup_save");
+        write_file(&live_save, "system_data.bin");
+        std::fs::write(live_save.join("system_data.bin"), b"ORIGINAL_DATA").unwrap();
+
+        copy_dir_all(&live_save, &backup_dir).unwrap();
+
+        let save_backups = vec![(live_save.clone(), backup_dir.clone())];
+        for (live, backup) in save_backups.iter().rev() {
+            let _ = std::fs::remove_dir_all(live);
+            let _ = copy_dir_all(backup, live);
+        }
+
+        assert_eq!(std::fs::read(live_save.join("system_data.bin")).unwrap(), b"ORIGINAL_DATA");
+        assert!(backup_dir.join("system_data.bin").is_file());
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

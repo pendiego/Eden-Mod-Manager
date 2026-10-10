@@ -183,9 +183,16 @@ impl Emu {
                     return Err("Nenhum perfil de usuário encontrado no emulador. Inicie o jogo ao menos uma vez.".into());
                 }
                 let tid_upper = tid.to_ascii_uppercase();
-                let chosen = entries.iter().find(|p| p.join(&tid_upper).exists())
-                    .unwrap_or(&entries[0]);
-                Ok(chosen.join(&tid_upper))
+                let matching: Vec<_> = entries.iter().filter(|p| p.join(&tid_upper).is_dir()).collect();
+                if matching.len() == 1 {
+                    Ok(matching[0].join(&tid_upper))
+                } else if matching.len() > 1 {
+                    Err("Múltiplos perfis de usuário encontrados com save deste jogo. Destino ambíguo.".into())
+                } else if entries.len() == 1 {
+                    Ok(entries[0].join(&tid_upper))
+                } else {
+                    Err("Pasta de save deste jogo não encontrada nos perfis. Inicie o jogo ao menos uma vez no emulador.".into())
+                }
             }
             Kind::Ryujinx => {
                 let user_save = self.dir.join("bis/user/save");
@@ -201,20 +208,7 @@ impl Emu {
                         }
                     }
                 }
-                let entries: Vec<_> = std::fs::read_dir(&user_save)
-                    .map_err(|e| format!("Falha ao ler pasta de saves: {e}"))?
-                    .filter_map(|e| e.ok())
-                    .filter(|e| e.file_type().is_ok_and(|ft| ft.is_dir()))
-                    .map(|e| e.path())
-                    .collect();
-                if let Some(first) = entries.first() {
-                    let zero = first.join("0");
-                    if zero.is_dir() {
-                        return Ok(zero);
-                    }
-                    return Ok(first.clone());
-                }
-                Err("Nenhum perfil de usuário encontrado no emulador. Inicie o jogo ao menos uma vez.".into())
+                Err("Save deste jogo não encontrado no Ryujinx. Inicie o jogo ao menos uma vez no emulador.".into())
             }
         }
     }
@@ -801,6 +795,46 @@ mod tests {
         std::fs::write(ryu_dir.join("games").join(tid.to_lowercase()).join("updates.json"), b"corrupted{").unwrap();
         let ryu = Emu { kind: Kind::Ryujinx, dir: ryu_dir };
         assert!(register_update(&ryu, tid, &update_path).is_err());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn save_dir_rejects_ambiguity_and_missing_mappings() {
+        let dir = std::env::temp_dir().join(format!("emm-savedir-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let emu = Emu { kind: Kind::Eden, dir: dir.clone() };
+        let tid = "01006A800016E000";
+
+        // Sem pasta user/save
+        assert!(emu.save_dir(tid).is_err());
+
+        // Múltiplos perfis sem save do jogo -> rejeita como ambíguo
+        let save_root = dir.join("nand/user/save/0000000000000000");
+        std::fs::create_dir_all(save_root.join("PROFILE_A")).unwrap();
+        std::fs::create_dir_all(save_root.join("PROFILE_B")).unwrap();
+        let err = emu.save_dir(tid).unwrap_err();
+        assert!(err.contains("não encontrada nos perfis"));
+
+        // Múltiplos perfis com save do jogo -> rejeita como ambíguo
+        std::fs::create_dir_all(save_root.join("PROFILE_A").join(tid)).unwrap();
+        std::fs::create_dir_all(save_root.join("PROFILE_B").join(tid)).unwrap();
+        let err2 = emu.save_dir(tid).unwrap_err();
+        assert!(err2.contains("Destino ambíguo"));
+
+        // Exatamente um perfil com save do jogo -> aceita sem ambiguidade
+        std::fs::remove_dir_all(save_root.join("PROFILE_B")).unwrap();
+        assert_eq!(emu.save_dir(tid).unwrap(), save_root.join("PROFILE_A").join(tid));
+
+        // Ryujinx: sem mapeamento no ExtraSaveDirInfo -> rejeita sem adivinhar pastas alheias
+        let ryu_dir = dir.join("ryu");
+        std::fs::create_dir_all(ryu_dir.join("bis/user/save/0000000000000001/0")).unwrap();
+        let ryu = Emu { kind: Kind::Ryujinx, dir: ryu_dir.clone() };
+        assert!(ryu.save_dir(tid).is_err());
+
+        // Ryujinx: com mapeamento no ExtraSaveDirInfo -> aceita pasta correta
+        std::fs::write(ryu_dir.join("bis/user/save/ExtraSaveDirInfo"), format!("{tid} 0000000000000001\n")).unwrap();
+        assert_eq!(ryu.save_dir(tid).unwrap(), ryu_dir.join("bis/user/save/0000000000000001/0"));
 
         let _ = std::fs::remove_dir_all(&dir);
     }

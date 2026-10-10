@@ -515,6 +515,9 @@ const ERR_EN: [string, string][] = [
   ["Falha ao criar backup do save: ", "Failed to create save backup: "],
   ["Falha ao copiar arquivo de save: ", "Failed to copy save file: "],
   ["Saves de jogos não podem ser desativados", "Game saves cannot be disabled"],
+  ["Múltiplos perfis de usuário encontrados com save deste jogo. Destino ambíguo.", "Multiple user profiles found with save data for this game. Destination ambiguous."],
+  ["Pasta de save deste jogo não encontrada nos perfis. Inicie o jogo ao menos uma vez no emulador.", "Save folder for this game not found in profiles. Start the game at least once in the emulator."],
+  ["Save deste jogo não encontrado no Ryujinx. Inicie o jogo ao menos uma vez no emulador.", "Save data for this game not found in Ryujinx. Start the game at least once in the emulator."],
 ];
 
 export function trErr(msg: string): string {
