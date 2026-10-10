@@ -53,7 +53,9 @@
   let gbAll = $state(localStorage.getItem("gbAll") === "on");
   let gb = $state<{ tid: string; status: "loading" | "ok" | "notfound" | "error"; mods: GbMod[]; error: string } | null>(null);
   const gbPendingMore = new Map<number, GbMore>();
-  let gbSort = $state<"likes" | "newest" | "views" | "name">("likes");
+  let gbSort = $state<"likes" | "newest" | "views" | "downloads" | "name">("likes");
+  // posição de cada mod no ranking de downloads do GameBanana (só os mais baixados; o resto fica depois, por curtidas)
+  let gbDlRank = $state<{ tid: string; rank: Map<string, number> } | null>(null);
   let gbFeaturedOnly = $state(false);
   let gbCategory = $state<string>("all");
   let hideNsfw = $state(true);
@@ -61,6 +63,14 @@
     const savedNsfw = localStorage.getItem("hideNsfw");
     if (savedNsfw !== null) hideNsfw = savedNsfw !== "0";
   });
+
+  async function sortByDownloads() {
+    gbSort = "downloads";
+    const game = selected;
+    if (!game?.name || gbDlRank?.tid === game.tid) return;
+    const ids = await run(() => api.gamebananaTopDownloads(game.name!));
+    if (ids) gbDlRank = { tid: game.tid, rank: new Map(ids.map((id, i) => [String(id), i])) };
+  }
 
   async function toggleNsfw(e?: Event) {
     const target = (e?.currentTarget as HTMLElement)?.tagName === "INPUT" ? (e?.currentTarget as HTMLInputElement) : null;
@@ -346,6 +356,12 @@
       case "views":
         filtered.sort((a, b) => b.views - a.views || b.likes - a.likes);
         break;
+      case "downloads": {
+        const rank = gbDlRank?.tid === selected.tid ? gbDlRank.rank : new Map<string, number>();
+        const pos = (m: GbMod) => rank.get(modPath(m)) ?? Infinity;
+        filtered.sort((a, b) => pos(a) - pos(b) || b.likes - a.likes);
+        break;
+      }
       case "newest": {
         const idNum = (id: string) => parseInt(id.replace(/\D/g, ""), 10) || 0;
         filtered.sort((a, b) => idNum(b.id) - idNum(a.id));
@@ -1022,6 +1038,7 @@
                 <button aria-pressed={gbSort === "likes"} onclick={() => (gbSort = "likes")}>{t("gbSortLikes")}</button>
                 <button aria-pressed={gbSort === "newest"} onclick={() => (gbSort = "newest")}>{t("gbSortNewest")}</button>
                 <button aria-pressed={gbSort === "views"} onclick={() => (gbSort = "views")}>{t("gbSortViews")}</button>
+                <button aria-pressed={gbSort === "downloads"} onclick={sortByDownloads}>{t("gbSortDownloads")}</button>
                 <button aria-pressed={gbSort === "name"} onclick={() => (gbSort = "name")}>{t("gbSortName")}</button>
               </div>
               <div class="seg" role="group" aria-label={t("gbFeaturedOnly")}>

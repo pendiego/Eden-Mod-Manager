@@ -149,18 +149,40 @@ async fn find_game(name: &str) -> Result<Option<u64>, String> {
     Ok(found)
 }
 
-/// Uma página do índice de mods do jogo, por curtidas (decrescente).
-async fn fetch_page(game: u64, featured: bool, page: u32) -> Result<Page<Rec>, String> {
+/// Uma página do índice de mods do jogo, ordenada por `sort` (decrescente).
+async fn fetch_page(game: u64, featured: bool, page: u32, sort: &'static str) -> Result<Page<Rec>, String> {
     let mut q = vec![
         ("_nPage", page.to_string()),
         ("_nPerpage", PER_PAGE.to_string()),
-        ("_sSort", "Generic_MostLiked".into()),
+        ("_sSort", sort.into()),
         ("_aFilters[Generic_Game]", game.to_string()),
     ];
     if featured {
         q.push(("_aFilters[Generic_WasFeatured]", "true".into()));
     }
     get("Mod/Index", &q).await
+}
+
+// jogo -> ids em ordem de mais baixados; o índice não traz `_nDownloadCount`, só aceita ordenar por ele
+static TOP_DL: LazyLock<Mutex<HashMap<u64, (Instant, Vec<u64>)>>> = LazyLock::new(Default::default);
+const TOP_DL_PAGES: u32 = 4;
+
+/// Ids dos mods mais baixados do jogo (até `TOP_DL_PAGES * PER_PAGE`), do primeiro para o último.
+pub async fn top_downloads(name: &str) -> Result<Vec<u64>, String> {
+    let Some(game) = find_game(name).await? else { return Ok(Vec::new()) };
+    if let Some((at, ids)) = TOP_DL.lock().get(&game) {
+        if at.elapsed() < TTL { return Ok(ids.clone()); }
+    }
+    let jobs: Vec<_> = (1..=TOP_DL_PAGES)
+        .map(|p| tauri::async_runtime::spawn(fetch_page(game, false, p, "Generic_MostDownloaded")))
+        .collect();
+    let mut ids = Vec::new();
+    for job in jobs {
+        let p = job.await.map_err(|e| format!("Falha de rede: {e}"))??;
+        ids.extend(p.records.into_iter().filter(|r| r.has_files && !r.obsolete).map(|r| r.id));
+    }
+    TOP_DL.lock().insert(game, (Instant::now(), ids.clone()));
+    Ok(ids)
 }
 
 /// Busca um lote contíguo de páginas e informa se atingiu o fim ou o corte de likes.
@@ -174,7 +196,7 @@ async fn fetch_chunk(
     let mut out = BTreeMap::new();
     let end = start_page + count;
     let jobs: Vec<_> = (start_page..end)
-        .map(|p| tauri::async_runtime::spawn(fetch_page(game, featured, p)))
+        .map(|p| tauri::async_runtime::spawn(fetch_page(game, featured, p, "Generic_MostLiked")))
         .collect();
     let mut complete = false;
     for job in jobs {
