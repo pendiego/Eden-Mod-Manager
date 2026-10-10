@@ -39,7 +39,7 @@ Use **+** in the Installed panel to install your own `.zip`, `.7z` or `.rar` arc
 ## Supported mods
 
 - Catalog mods from the official database, TheBoy181, the Switch Mods Wiki Archive and the PT-BR translation pack.
-- GameBanana mods. These are third-party uploads and are not reviewed by this app. Browse curated or all mods, filter by mod type (courses, skins, modpacks, etc.), sort by popularity, date, views or name, filter featured community creations, and toggle the adult content filter (enabled by default).
+- GameBanana mods. These are third-party uploads and are not reviewed by this app. Browse curated or all mods, filter by mod type (courses, skins, modpacks, etc.), sort by likes, date, views, downloads or name, filter featured community creations, and toggle the adult content filter (enabled by default). The downloads sort ranks the game's 200 most downloaded mods first (GameBanana's index does not expose download counts); the rest follow by likes.
 - Standard mod archives with recognized `romfs`, `exefs`, `romfslite`, `romfs_ext` or `cheats` content.
 - Mario Kart 8 Deluxe archives with raw `Audio`, `Course`, `Driver`, `Kart` or `UI` folders.
 - Super Smash Bros. Ultimate ARCropolis mods for Eden and Ryujinx. Yuzu is not supported for ARCropolis.

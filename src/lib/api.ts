@@ -100,6 +100,7 @@ export const api = {
   gamebananaMods: (tid: string, name: string, all: boolean, requestId: number, fresh = false) =>
     invoke<GbList>("gamebanana_mods", { tid, name, all, fresh, requestId }),
   gamebananaDetail: (id: number) => invoke<GbDetail>("gamebanana_detail", { id }),
+  gamebananaTopDownloads: (name: string) => invoke<number[]>("gamebanana_top_downloads", { name }),
   listGames: () => invoke<Game[]>("list_games"),
   gameCover: (tid: string) => invoke<string | null>("game_cover", { tid }),
   listInstalled: (tid: string) => invoke<InstalledView[]>("list_installed", { tid }),

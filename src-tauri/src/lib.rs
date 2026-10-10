@@ -256,6 +256,11 @@ async fn gamebanana_mods(app: AppHandle, state: State<'_, CatalogState>, tid: St
 async fn gamebanana_detail(id: u64) -> Result<gamebanana::GbDetail, String> {
     gamebanana::detail(id).await
 }
+
+#[tauri::command]
+async fn gamebanana_top_downloads(name: String) -> Result<Vec<u64>, String> {
+    gamebanana::top_downloads(&name).await
+}
 #[derive(Deserialize)]
 struct PrefetchGame {
     tid: String,
@@ -346,6 +351,7 @@ pub fn run() {
             get_catalog,
             gamebanana_mods,
             gamebanana_detail,
+            gamebanana_top_downloads,
             list_games,
             game_cover,
             open_mod_folder,
