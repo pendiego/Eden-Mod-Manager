@@ -81,6 +81,13 @@ struct GameRec {
     name: String,
 }
 
+const MAX_RETRIES: u32 = 3;
+
+/// Pausa antes da nova tentativa após um 429: `Retry-After` se o site informar, senão 2 s, 4 s, 8 s; no máximo 15 s.
+fn backoff(tries: u32, retry_after: Option<u64>) -> Duration {
+    Duration::from_secs(retry_after.unwrap_or(2u64 << tries).min(15))
+}
+
 async fn get<T: serde::de::DeserializeOwned>(path: &str, query: &[(&str, String)]) -> Result<T, String> {
     let qs: Vec<String> = query
         .iter()
@@ -89,7 +96,7 @@ async fn get<T: serde::de::DeserializeOwned>(path: &str, query: &[(&str, String)
     let url = format!("{API}/{path}?{}", qs.join("&"));
     // no máximo MAX_INFLIGHT pedidos simultâneos no total, qualquer que seja o número de varreduras
     let _permit = INFLIGHT.acquire().await.map_err(|e| e.to_string())?;
-    let mut tries = 0;
+    let mut tries = 0u32;
     let resp = loop {
         let resp = HTTP_JSON
             .get(&url)
@@ -98,11 +105,11 @@ async fn get<T: serde::de::DeserializeOwned>(path: &str, query: &[(&str, String)
             .send()
             .await
             .map_err(|e| format!("Falha de rede: {e}"))?;
-        // 429: uma nova tentativa depois de uma pausa (respeita Retry-After, até 5 s)
-        if resp.status().as_u16() == 429 && tries == 0 {
+        // 429: até MAX_RETRIES novas tentativas com pausa crescente; o permit fica retido, então os demais pedidos também esperam
+        if resp.status().as_u16() == 429 && tries < MAX_RETRIES {
+            let after = resp.headers().get("retry-after").and_then(|v| v.to_str().ok()).and_then(|v| v.parse().ok());
+            tokio::time::sleep(backoff(tries, after)).await;
             tries += 1;
-            let wait = resp.headers().get("retry-after").and_then(|v| v.to_str().ok()).and_then(|v| v.parse().ok()).unwrap_or(2u64);
-            tokio::time::sleep(Duration::from_secs(wait.min(5))).await;
             continue;
         }
         break resp;
@@ -522,6 +529,14 @@ pub async fn download_url(mod_id: &str) -> Result<(String, String), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn backoff_grows_honors_retry_after_and_is_capped() {
+        let secs = |t, a| backoff(t, a).as_secs();
+        assert_eq!((secs(0, None), secs(1, None), secs(2, None)), (2, 4, 8));
+        assert_eq!(secs(0, Some(7)), 7);
+        assert_eq!(secs(0, Some(600)), 15);
+    }
 
     /// Registro mínimo (campos opcionais ausentes) e extras desconhecidos não podem quebrar o parse.
     #[test]
