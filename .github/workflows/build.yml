@@ -47,15 +47,11 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          # EdenModManager-portable.zip: nome atual. EdenModHub-portable.zip: legado, só para
-          # o atualizador dos portáteis já distribuídos (<= 0.2.2), que procuram esse nome e EdenModHub.exe.
-          foreach ($n in "EdenModManager", "EdenModHub") {
-            New-Item -ItemType Directory "portable-$n" | Out-Null
-            Copy-Item src-tauri/target/release/eden-mod-manager.exe "portable-$n/$n.exe"
-            New-Item "portable-$n/portable" -ItemType File | Out-Null
-            Compress-Archive "portable-$n/*" "$n-portable.zip"
-            npx tauri signer sign -k "$env:TAURI_SIGNING_PRIVATE_KEY" -p "$env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD" "$n-portable.zip"
-          }
+          New-Item -ItemType Directory "portable-EdenModManager" | Out-Null
+          Copy-Item src-tauri/target/release/eden-mod-manager.exe "portable-EdenModManager/EdenModManager.exe"
+          New-Item "portable-EdenModManager/portable" -ItemType File | Out-Null
+          Compress-Archive "portable-EdenModManager/*" "EdenModManager-portable.zip"
+          npx tauri signer sign -k "$env:TAURI_SIGNING_PRIVATE_KEY" -p "$env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD" "EdenModManager-portable.zip"
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
@@ -66,8 +62,7 @@ jobs:
             src-tauri/target/release/bundle/*/*
             EdenModManager-portable.zip
             EdenModManager-portable.zip.sig
-            EdenModHub-portable.zip
-            EdenModHub-portable.zip.sig
+
           if-no-files-found: ignore
       - name: Anexar portátil à Release
         if: startsWith(github.ref, 'refs/tags/v') && runner.os == 'Windows'
@@ -76,5 +71,3 @@ jobs:
           files: |
             EdenModManager-portable.zip
             EdenModManager-portable.zip.sig
-            EdenModHub-portable.zip
-            EdenModHub-portable.zip.sig
