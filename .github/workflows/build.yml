@@ -66,8 +66,7 @@ jobs:
           if-no-files-found: ignore
       - name: Anexar portátil à Release
         if: startsWith(github.ref, 'refs/tags/v') && runner.os == 'Windows'
-        uses: softprops/action-gh-release@v2
-        with:
-          files: |
-            EdenModManager-portable.zip
-            EdenModManager-portable.zip.sig
+        shell: pwsh
+        run: gh release upload "$env:GITHUB_REF_NAME" EdenModManager-portable.zip EdenModManager-portable.zip.sig --clobber
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
